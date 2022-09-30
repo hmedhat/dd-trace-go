@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"gopkg.in/DataDog/dd-trace-go.v1/internal"
+	"gopkg.in/DataDog/dd-trace-go.v1/internal/agent"
 	"gopkg.in/DataDog/dd-trace-go.v1/internal/globalconfig"
 	"gopkg.in/DataDog/dd-trace-go.v1/internal/osinfo"
 	"gopkg.in/DataDog/dd-trace-go.v1/internal/version"
@@ -70,6 +72,9 @@ type Client struct {
 	// APIKey should be supplied if the endpoint is not a Datadog agent,
 	// i.e. you are sending telemetry directly to Datadog
 	APIKey string
+	// Agentless indicates that telemetry is being sent directly to the
+	// telemetry backend.
+	Agentless bool
 	// How often to send batched requests. Defaults to 60s
 	SubmissionInterval time.Duration
 
@@ -142,6 +147,49 @@ func (c *Client) Start(integrations []Integration, configuration []Configuration
 	if c.started {
 		return
 	}
+
+	if c.Client == nil {
+		c.Client = defaultClient
+	}
+
+	if c.Agentless && c.APIKey == "" {
+		c.log("must provide an API key if not connecting to an agent")
+		return
+	}
+
+	// For the URL, uploading through agent goes through
+	//	${AGENT_URL}/telemetry/proxy/api/v2/apmtelemetry
+	// for agentless (which we technically don't support):
+	//	https://instrumentation-telemetry-intake.datadoghq.com/api/v2/apmtelemetry
+	// with an API key
+	if c.Agentless && c.URL == "" {
+		c.URL = "https://instrumentation-telemetry-intake.datadoghq.com/api/v2/apmtelemetry"
+	}
+	u, err := url.Parse(c.URL)
+	if err != nil {
+		c.log("agent URL %s is invalid: %s", c.URL, err)
+		return
+	}
+	if !c.Agentless {
+		features, err := agent.LoadFeatures(u.Host, c.Client)
+		if err != nil {
+			c.log("couldn't get agent features: %s", err)
+			return
+		}
+		// disable telemetry unless we find the agent endpoint
+		c.Disabled = true
+		for _, endpoint := range features.Endpoints {
+			if endpoint == "/telemetry/proxy/api/v2/apmtelemetry" {
+				u.Path = endpoint
+				c.URL = u.String()
+				c.Disabled = false
+			}
+		}
+	}
+	if c.Disabled {
+		return
+	}
+
 	c.debug = internal.BoolEnv("DD_INSTRUMENTATION_TELEMETRY_DEBUG", c.debug)
 
 	c.started = true

@@ -18,10 +18,22 @@ import (
 	"gopkg.in/DataDog/dd-trace-go.v1/internal/telemetry"
 )
 
+type testLogger struct {
+	t *testing.T
+}
+
+func (t *testLogger) Printf(msg string, args ...interface{}) {
+	t.t.Logf(msg, args...)
+}
+
 func TestClient(t *testing.T) {
 	heartbeat := make(chan struct{})
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/info" {
+			writeAgentInfo(w)
+			return
+		}
 		h := r.Header.Get("DD-Telemetry-Request-Type")
 		if len(h) == 0 {
 			t.Fatal("didn't get telemetry request type header")
@@ -38,6 +50,7 @@ func TestClient(t *testing.T) {
 	client := &telemetry.Client{
 		URL:                server.URL,
 		SubmissionInterval: time.Millisecond,
+		Logger:             &testLogger{t: t},
 	}
 	client.Start(nil, nil)
 	client.Start(nil, nil) // test idempotence
@@ -54,6 +67,10 @@ func TestMetrics(t *testing.T) {
 	closed := make(chan struct{}, 1)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/info" {
+			writeAgentInfo(w)
+			return
+		}
 		if r.Header.Get("DD-Telemetry-Request-Type") == string(telemetry.RequestTypeAppClosing) {
 			select {
 			case closed <- struct{}{}:
@@ -90,7 +107,8 @@ func TestMetrics(t *testing.T) {
 
 	go func() {
 		client := &telemetry.Client{
-			URL: server.URL,
+			URL:    server.URL,
+			Logger: &testLogger{t: t},
 		}
 		client.Start(nil, nil)
 
@@ -130,6 +148,7 @@ func TestDisabledClient(t *testing.T) {
 	client := &telemetry.Client{
 		URL:                server.URL,
 		SubmissionInterval: time.Millisecond,
+		Logger:             &testLogger{t: t},
 	}
 	client.Start(nil, nil)
 	client.Gauge("foobar", 1, nil, false)
@@ -146,6 +165,7 @@ func TestNonStartedClient(t *testing.T) {
 	client := &telemetry.Client{
 		URL:                server.URL,
 		SubmissionInterval: time.Millisecond,
+		Logger:             &testLogger{t: t},
 	}
 	client.Gauge("foobar", 1, nil, false)
 	client.Count("bonk", 4, []string{"org:1"}, false)
@@ -159,7 +179,10 @@ func TestConcurrentClient(t *testing.T) {
 	)
 	closed := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Log("foo")
+		if r.URL.Path == "/info" {
+			writeAgentInfo(w)
+			return
+		}
 		if r.Header.Get("DD-Telemetry-Request-Type") == string(telemetry.RequestTypeAppClosing) {
 			select {
 			case closed <- struct{}{}:
@@ -196,7 +219,8 @@ func TestConcurrentClient(t *testing.T) {
 
 	go func() {
 		client := &telemetry.Client{
-			URL: server.URL,
+			URL:    server.URL,
+			Logger: &testLogger{t: t},
 		}
 		client.Start(nil, nil)
 		defer client.Stop()
@@ -225,4 +249,12 @@ func TestConcurrentClient(t *testing.T) {
 	if !reflect.DeepEqual(want, got) {
 		t.Fatalf("want %+v, got %+v", want, got)
 	}
+}
+
+func writeAgentInfo(w http.ResponseWriter) {
+	response := []byte(`{
+		"endpoints": ["/telemetry/proxy/api/v2/apmtelemetry"]
+	}`)
+	w.Header().Set("Content-Type", "encoding/json")
+	w.Write(response)
 }
